@@ -1,0 +1,43 @@
+{
+  "title": "OTTx",
+  "children": [
+    {
+      "title": "Overview",
+      "lines": [
+        "3-band multiband",
+        "upward + downward",
+        "compressor.",
+        "",
+        "A faithful port of",
+        "vitOTTx (Vital's OTT",
+        "DSP).",
+        "",
+        "GPLv3."
+      ]
+    },
+    {
+      "title": "Knobs",
+      "lines": [
+        "1 Depth",
+        "2 Upward",
+        "3 Downward",
+        "4 Time",
+        "5 In Gain",
+        "6 Out Gain",
+        "7 Mix"
+      ]
+    },
+    {
+      "title": "Advanced",
+      "lines": [
+        "Per-band thresholds,",
+        "ratios, output gain,",
+        "and the two crossover",
+        "frequencies.",
+        "",
+        "Depth scales all band",
+        "ratios at once."
+      ]
+    }
+  ]
+}
