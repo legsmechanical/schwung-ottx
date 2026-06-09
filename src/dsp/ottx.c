@@ -440,7 +440,64 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     OTTX_GET("hl_ratio", hl_ratio); OTTX_GET("hu_ratio", hu_ratio);
     #undef OTTX_GET
 
+    /* "time" is a write-macro that sets att_time + rel_time together. The shadow
+     * UI reads a param's current value via get_param to make it editable, so it
+     * MUST be gettable or the editor shows "nothing to adjust". Report att_time
+     * as the macro's representative value. */
+    if (strcmp(key, "time") == 0) return snprintf(buf, buf_len, "%.4f", p->att_time);
+
     if (strcmp(key, "name") == 0) return snprintf(buf, buf_len, "OTTx");
+
+    /* chain_params: per-param metadata (name/range/unit/step) served live from
+     * the plugin. The Master/Send FX bus reads this from the .so's get_param
+     * (shadow_chain_mgmt.c); without it the bus falls back to a stale cached
+     * module.json parse, so labels/ranges never refresh. Keep in sync with
+     * module.json's ui_hierarchy param objects (single source of truth). */
+    if (strcmp(key, "chain_params") == 0) {
+        typedef struct { const char *key, *name, *unit; float min, max, def, step; } ottx_pmeta_t;
+        static const ottx_pmeta_t OTTX_PMETA[] = {
+            {"mix","Mix","%",0.0f,1.0f,1.0f,0.02f},
+            {"depth","Depth","%",0.0f,1.0f,1.0f,0.02f},
+            {"upward","Upward","",0.0f,2.0f,1.0f,0.02f},
+            {"downward","Downward","",0.0f,2.0f,1.0f,0.02f},
+            {"time","Time","%",0.0f,1.0f,0.5f,0.02f},
+            {"in_gain","In Gain","dB",-60.0f,30.0f,0.0f,0.5f},
+            {"out_gain","Out Gain","dB",-60.0f,30.0f,0.0f,0.5f},
+            {"low_cross","Low/Mid Hz","Hz",20.0f,18000.0f,120.0f,10.0f},
+            {"high_cross","Mid/Hi Hz","Hz",20.0f,18000.0f,2500.0f,10.0f},
+            {"att_time","Attack","%",0.0f,1.0f,0.5f,0.02f},
+            {"rel_time","Release","%",0.0f,1.0f,0.5f,0.02f},
+            {"ll_thres","Low Up Thr","dB",-80.0f,0.0f,-35.0f,1.0f},
+            {"ll_ratio","Low Up Ratio","%",-1.0f,1.0f,0.8f,0.02f},
+            {"lu_thres","Low Dn Thr","dB",-80.0f,0.0f,-28.0f,1.0f},
+            {"lu_ratio","Low Dn Ratio","%",0.0f,1.0f,0.9f,0.02f},
+            {"lgain","Low Gain","dB",-30.0f,30.0f,16.3f,0.5f},
+            {"bl_thres","Mid Up Thr","dB",-80.0f,0.0f,-36.0f,1.0f},
+            {"bl_ratio","Mid Up Ratio","%",-1.0f,1.0f,0.8f,0.02f},
+            {"bu_thres","Mid Dn Thr","dB",-80.0f,0.0f,-25.0f,1.0f},
+            {"bu_ratio","Mid Dn Ratio","%",0.0f,1.0f,0.857f,0.02f},
+            {"mgain","Mid Gain","dB",-30.0f,30.0f,11.7f,0.5f},
+            {"hl_thres","Hi Up Thr","dB",-80.0f,0.0f,-35.0f,1.0f},
+            {"hl_ratio","Hi Up Ratio","%",-1.0f,1.0f,0.8f,0.02f},
+            {"hu_thres","Hi Dn Thr","dB",-80.0f,0.0f,-30.0f,1.0f},
+            {"hu_ratio","Hi Dn Ratio","%",0.0f,1.0f,1.0f,0.02f},
+            {"hgain","Hi Gain","dB",-30.0f,30.0f,16.3f,0.5f},
+        };
+        int count = (int)(sizeof(OTTX_PMETA) / sizeof(OTTX_PMETA[0]));
+        int n = 0;
+        n += snprintf(buf + n, buf_len - n, "[");
+        for (int i = 0; i < count && n < buf_len; i++) {
+            const ottx_pmeta_t *m = &OTTX_PMETA[i];
+            n += snprintf(buf + n, buf_len - n,
+                "%s{\"key\":\"%s\",\"name\":\"%s\",\"type\":\"float\","
+                "\"min\":%g,\"max\":%g,\"default\":%g,\"step\":%g%s%s%s}",
+                i ? "," : "", m->key, m->name,
+                (double)m->min, (double)m->max, (double)m->def, (double)m->step,
+                m->unit[0] ? ",\"unit\":\"" : "", m->unit, m->unit[0] ? "\"" : "");
+        }
+        n += snprintf(buf + n, buf_len - n, "]");
+        return n;
+    }
 
     if (strcmp(key, "state") == 0) {
         return snprintf(buf, buf_len,
@@ -462,17 +519,25 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         const char *h =
             "{\"modes\":null,\"levels\":{"
               "\"root\":{"
-                "\"children\":[{\"level\":\"advanced\",\"label\":\"Advanced\"}],"
-                "\"knobs\":[\"depth\",\"upward\",\"downward\",\"time\",\"in_gain\",\"out_gain\",\"mix\"],"
-                "\"params\":[\"depth\",\"upward\",\"downward\",\"time\",\"in_gain\",\"out_gain\",\"mix\",\"low_cross\",\"high_cross\"]"
+                "\"children\":null,"
+                "\"knobs\":[\"mix\",\"depth\",\"upward\",\"downward\",\"time\",\"in_gain\",\"out_gain\"],"
+                /* The Advanced submenu link MUST be a {"level":...} entry inside
+                 * params — the shadow-UI renderer only navigates params entries,
+                 * never a bare children[] array. */
+                "\"params\":[\"mix\",\"depth\",\"upward\",\"downward\",\"time\",\"in_gain\",\"out_gain\",\"low_cross\",\"high_cross\",{\"level\":\"advanced\",\"label\":\"Advanced\"}]"
               "},"
               "\"advanced\":{"
                 "\"children\":null,"
-                "\"knobs\":[\"low_cross\",\"high_cross\",\"att_time\",\"rel_time\"],"
-                "\"params\":[\"low_cross\",\"high_cross\",\"att_time\",\"rel_time\","
-                  "\"ll_thres\",\"lu_thres\",\"ll_ratio\",\"lu_ratio\",\"lgain\","
-                  "\"bl_thres\",\"bu_thres\",\"bl_ratio\",\"bu_ratio\",\"mgain\","
-                  "\"hl_thres\",\"hu_thres\",\"hl_ratio\",\"hu_ratio\",\"hgain\"]"
+                /* Crossovers live on the root list only (shared between bands);
+                 * don't duplicate them here. Advanced is the per-band detail,
+                 * flat and ordered Low -> Mid -> High. */
+                "\"knobs\":[\"att_time\",\"rel_time\",\"lgain\",\"mgain\",\"hgain\"],"
+                /* Per band, pair each threshold with its ratio: Up Thr, Up Ratio,
+                 * Dn Thr, Dn Ratio, Gain. */
+                "\"params\":[\"att_time\",\"rel_time\","
+                  "\"ll_thres\",\"ll_ratio\",\"lu_thres\",\"lu_ratio\",\"lgain\","
+                  "\"bl_thres\",\"bl_ratio\",\"bu_thres\",\"bu_ratio\",\"mgain\","
+                  "\"hl_thres\",\"hl_ratio\",\"hu_thres\",\"hu_ratio\",\"hgain\"]"
               "}"
             "}}";
         int len = (int)strlen(h);

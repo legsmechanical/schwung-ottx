@@ -17,41 +17,290 @@
         "root": {
           "name": "OTTx",
           "params": [
-            {"key": "depth",      "name": "Depth",    "type": "float", "min": 0.0, "max": 1.0, "default": 1.0, "step": 0.02, "unit": "%", "display_format": "%.0f"},
-            {"key": "upward",     "name": "Upward",   "type": "float", "min": 0.0, "max": 2.0, "default": 1.0, "step": 0.02},
-            {"key": "downward",   "name": "Downward", "type": "float", "min": 0.0, "max": 2.0, "default": 1.0, "step": 0.02},
-            {"key": "time",       "name": "Time",     "type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.02},
-            {"key": "in_gain",    "name": "In Gain",  "type": "float", "min": -60.0, "max": 30.0, "default": 0.0, "step": 0.5, "unit": "dB"},
-            {"key": "out_gain",   "name": "Out Gain", "type": "float", "min": -60.0, "max": 30.0, "default": 0.0, "step": 0.5, "unit": "dB"},
-            {"key": "mix",        "name": "Mix",      "type": "float", "min": 0.0, "max": 1.0, "default": 1.0, "step": 0.02, "unit": "%", "display_format": "%.0f"},
-            {"key": "low_cross",  "name": "Low/Mid Hz","type": "float", "min": 20.0, "max": 18000.0, "default": 120.0, "step": 10.0, "unit": "Hz"},
-            {"key": "high_cross", "name": "Mid/Hi Hz", "type": "float", "min": 20.0, "max": 18000.0, "default": 2500.0, "step": 10.0, "unit": "Hz"},
-            {"level": "advanced", "label": "Advanced"}
+            {
+              "key": "mix",
+              "name": "Mix",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 1.0,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "depth",
+              "name": "Depth",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 1.0,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "upward",
+              "name": "Upward",
+              "type": "float",
+              "min": 0.0,
+              "max": 2.0,
+              "default": 1.0,
+              "step": 0.02
+            },
+            {
+              "key": "downward",
+              "name": "Downward",
+              "type": "float",
+              "min": 0.0,
+              "max": 2.0,
+              "default": 1.0,
+              "step": 0.02
+            },
+            {
+              "key": "time",
+              "name": "Time",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 0.5,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "in_gain",
+              "name": "In Gain",
+              "type": "float",
+              "min": -60.0,
+              "max": 30.0,
+              "default": 0.0,
+              "step": 0.5,
+              "unit": "dB"
+            },
+            {
+              "key": "out_gain",
+              "name": "Out Gain",
+              "type": "float",
+              "min": -60.0,
+              "max": 30.0,
+              "default": 0.0,
+              "step": 0.5,
+              "unit": "dB"
+            },
+            {
+              "key": "low_cross",
+              "name": "Low/Mid Hz",
+              "type": "float",
+              "min": 20.0,
+              "max": 18000.0,
+              "default": 120.0,
+              "step": 10.0,
+              "unit": "Hz"
+            },
+            {
+              "key": "high_cross",
+              "name": "Mid/Hi Hz",
+              "type": "float",
+              "min": 20.0,
+              "max": 18000.0,
+              "default": 2500.0,
+              "step": 10.0,
+              "unit": "Hz"
+            },
+            {
+              "level": "advanced",
+              "label": "Advanced"
+            }
           ],
-          "knobs": ["depth", "upward", "downward", "time", "in_gain", "out_gain", "mix"]
+          "knobs": [
+            "mix",
+            "depth",
+            "upward",
+            "downward",
+            "time",
+            "in_gain",
+            "out_gain"
+          ]
         },
         "advanced": {
           "name": "Advanced",
           "params": [
-            {"key": "att_time", "name": "Attack",  "type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.02},
-            {"key": "rel_time", "name": "Release", "type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "step": 0.02},
-            {"key": "ll_thres", "name": "Low Thr-",  "type": "float", "min": -80.0, "max": 0.0, "default": -35.0, "step": 1.0, "unit": "dB"},
-            {"key": "lu_thres", "name": "Low Thr+",  "type": "float", "min": -80.0, "max": 0.0, "default": -28.0, "step": 1.0, "unit": "dB"},
-            {"key": "ll_ratio", "name": "Low Up",    "type": "float", "min": -1.0, "max": 1.0, "default": 0.8, "step": 0.02},
-            {"key": "lu_ratio", "name": "Low Dn",    "type": "float", "min": 0.0, "max": 1.0, "default": 0.9, "step": 0.02},
-            {"key": "lgain",    "name": "Low Gain",  "type": "float", "min": -30.0, "max": 30.0, "default": 16.3, "step": 0.5, "unit": "dB"},
-            {"key": "bl_thres", "name": "Mid Thr-",  "type": "float", "min": -80.0, "max": 0.0, "default": -36.0, "step": 1.0, "unit": "dB"},
-            {"key": "bu_thres", "name": "Mid Thr+",  "type": "float", "min": -80.0, "max": 0.0, "default": -25.0, "step": 1.0, "unit": "dB"},
-            {"key": "bl_ratio", "name": "Mid Up",    "type": "float", "min": -1.0, "max": 1.0, "default": 0.8, "step": 0.02},
-            {"key": "bu_ratio", "name": "Mid Dn",    "type": "float", "min": 0.0, "max": 1.0, "default": 0.857, "step": 0.02},
-            {"key": "mgain",    "name": "Mid Gain",  "type": "float", "min": -30.0, "max": 30.0, "default": 11.7, "step": 0.5, "unit": "dB"},
-            {"key": "hl_thres", "name": "Hi Thr-",   "type": "float", "min": -80.0, "max": 0.0, "default": -35.0, "step": 1.0, "unit": "dB"},
-            {"key": "hu_thres", "name": "Hi Thr+",   "type": "float", "min": -80.0, "max": 0.0, "default": -30.0, "step": 1.0, "unit": "dB"},
-            {"key": "hl_ratio", "name": "Hi Up",     "type": "float", "min": -1.0, "max": 1.0, "default": 0.8, "step": 0.02},
-            {"key": "hu_ratio", "name": "Hi Dn",     "type": "float", "min": 0.0, "max": 1.0, "default": 1.0, "step": 0.02},
-            {"key": "hgain",    "name": "Hi Gain",   "type": "float", "min": -30.0, "max": 30.0, "default": 16.3, "step": 0.5, "unit": "dB"}
+            {
+              "key": "att_time",
+              "name": "Attack",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 0.5,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "rel_time",
+              "name": "Release",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 0.5,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "ll_thres",
+              "name": "Low Up Thr",
+              "type": "float",
+              "min": -80.0,
+              "max": 0.0,
+              "default": -35.0,
+              "step": 1.0,
+              "unit": "dB"
+            },
+            {
+              "key": "ll_ratio",
+              "name": "Low Up Ratio",
+              "type": "float",
+              "min": -1.0,
+              "max": 1.0,
+              "default": 0.8,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "lu_thres",
+              "name": "Low Dn Thr",
+              "type": "float",
+              "min": -80.0,
+              "max": 0.0,
+              "default": -28.0,
+              "step": 1.0,
+              "unit": "dB"
+            },
+            {
+              "key": "lu_ratio",
+              "name": "Low Dn Ratio",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 0.9,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "lgain",
+              "name": "Low Gain",
+              "type": "float",
+              "min": -30.0,
+              "max": 30.0,
+              "default": 16.3,
+              "step": 0.5,
+              "unit": "dB"
+            },
+            {
+              "key": "bl_thres",
+              "name": "Mid Up Thr",
+              "type": "float",
+              "min": -80.0,
+              "max": 0.0,
+              "default": -36.0,
+              "step": 1.0,
+              "unit": "dB"
+            },
+            {
+              "key": "bl_ratio",
+              "name": "Mid Up Ratio",
+              "type": "float",
+              "min": -1.0,
+              "max": 1.0,
+              "default": 0.8,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "bu_thres",
+              "name": "Mid Dn Thr",
+              "type": "float",
+              "min": -80.0,
+              "max": 0.0,
+              "default": -25.0,
+              "step": 1.0,
+              "unit": "dB"
+            },
+            {
+              "key": "bu_ratio",
+              "name": "Mid Dn Ratio",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 0.857,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "mgain",
+              "name": "Mid Gain",
+              "type": "float",
+              "min": -30.0,
+              "max": 30.0,
+              "default": 11.7,
+              "step": 0.5,
+              "unit": "dB"
+            },
+            {
+              "key": "hl_thres",
+              "name": "Hi Up Thr",
+              "type": "float",
+              "min": -80.0,
+              "max": 0.0,
+              "default": -35.0,
+              "step": 1.0,
+              "unit": "dB"
+            },
+            {
+              "key": "hl_ratio",
+              "name": "Hi Up Ratio",
+              "type": "float",
+              "min": -1.0,
+              "max": 1.0,
+              "default": 0.8,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "hu_thres",
+              "name": "Hi Dn Thr",
+              "type": "float",
+              "min": -80.0,
+              "max": 0.0,
+              "default": -30.0,
+              "step": 1.0,
+              "unit": "dB"
+            },
+            {
+              "key": "hu_ratio",
+              "name": "Hi Dn Ratio",
+              "type": "float",
+              "min": 0.0,
+              "max": 1.0,
+              "default": 1.0,
+              "step": 0.02,
+              "unit": "%"
+            },
+            {
+              "key": "hgain",
+              "name": "Hi Gain",
+              "type": "float",
+              "min": -30.0,
+              "max": 30.0,
+              "default": 16.3,
+              "step": 0.5,
+              "unit": "dB"
+            }
           ],
-          "knobs": ["att_time", "rel_time", "lgain", "mgain", "hgain"]
+          "knobs": [
+            "att_time",
+            "rel_time",
+            "lgain",
+            "mgain",
+            "hgain"
+          ]
         }
       }
     }
