@@ -15,9 +15,7 @@ classic "OTT" sound. This is a faithful scalar-C port of
 ### Via Module Store (Recommended)
 
 1. Launch Schwung on your Move
-2. Select **Module Store** from the main menu
-3. Navigate to **Audio FX** → **OTTx**
-4. Select **Install**
+2. Install via Schwung manager: http://move.local:7700/
 
 ### Manual Installation
 
