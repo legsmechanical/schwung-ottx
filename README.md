@@ -1,4 +1,4 @@
-# Schwung OTTx
+# OTTx
 
 A 3-band multiband **upward + downward** compressor audio-FX module for
 [Schwung](https://github.com/charlesvestal/schwung) on the Ableton Move — the
