@@ -35,21 +35,60 @@ recombined with per-band makeup gain and a global dry/wet mix.
 
 ## Controls
 
-Root knobs (the OTT macros):
+### Root (the OTT macros)
 
-| Knob | Range | Default | Description |
-|------|-------|---------|-------------|
-| Depth    | 0–100% | 100% | Scales all band compression ratios at once — the master "amount" |
-| Upward   | 0–2×   | 1.0  | Multiplies the upward (lower) ratios |
-| Downward | 0–2×   | 1.0  | Multiplies the downward (upper) ratios |
-| Time     | 0–1    | 0.5  | Attack/release macro (drives both together) |
-| In Gain  | −60…30 dB | 0 dB | Input trim |
-| Out Gain | −60…30 dB | 0 dB | Output trim |
-| Mix      | 0–100% | 100% | Dry/wet blend |
+These are mapped to the knobs, in this order:
 
-The **Advanced** level exposes the full per-band controls (lower/upper
-thresholds and ratios, makeup gain for Low/Mid/High) plus both crossover
-frequencies and the raw Attack/Release.
+| Param | Range | Default | Description |
+|-------|-------|---------|-------------|
+| Mix        | 0–100%       | 100%    | Dry/wet blend |
+| Depth      | 0–100%       | 100%    | Scales every band's compression ratios at once — the master "amount" |
+| Upward     | 0–2×         | 1.0×    | Multiplies the upward (boost-quiet) ratios on every band |
+| Downward   | 0–2×         | 1.0×    | Multiplies the downward (tame-loud) ratios on every band |
+| Time       | 0–100%       | 50%     | Attack/release macro — drives both together (higher = slower) |
+| In Gain    | −60…+30 dB   | 0 dB    | Input trim |
+| Out Gain   | −60…+30 dB   | 0 dB    | Output trim |
+| Low/Mid Hz | 20 Hz–18 kHz | 120 Hz  | Low ↔ mid crossover frequency |
+| Mid/Hi Hz  | 20 Hz–18 kHz | 2.5 kHz | Mid ↔ high crossover frequency |
+
+### Advanced (per-band detail)
+
+Open **Advanced** from the bottom of the root list. It holds two global timing
+controls plus five controls for each band (**Low / Mid / High**):
+
+- **Up Thr** — the *upward* threshold. Signal **below** it is lifted up toward
+  it; the quieter it is, the more it's boosted.
+- **Up Ratio** — strength of that upward lift. Negative values flip it into
+  downward *expansion* instead.
+- **Dn Thr** — the *downward* threshold. Peaks **above** it are pushed back down
+  toward it.
+- **Dn Ratio** — strength of that downward compression.
+- **Gain** — per-band makeup/output gain, applied after compression.
+
+> Depth × Upward scales every band's **Up Ratio**, and Depth × Downward scales
+> every **Dn Ratio** — the root macros ride on top of these per-band amounts.
+
+| Param        | Range       | Default  | Description |
+|--------------|-------------|----------|-------------|
+| Attack       | 0–100%      | 50%      | Envelope attack for all bands — higher = slower reaction to transients |
+| Release      | 0–100%      | 50%      | Envelope release — higher = slower recovery |
+| Low Up Thr   | −80…0 dB    | −35 dB   | Low band — upward (boost) threshold |
+| Low Up Ratio | −100…100%   | 80%      | Low band — upward amount (negative = expansion) |
+| Low Dn Thr   | −80…0 dB    | −28 dB   | Low band — downward (tame) threshold |
+| Low Dn Ratio | 0–100%      | 90%      | Low band — downward amount |
+| Low Gain     | −30…+30 dB  | 16.3 dB  | Low band — makeup gain |
+| Mid Up Thr   | −80…0 dB    | −36 dB   | Mid band — upward threshold |
+| Mid Up Ratio | −100…100%   | 80%      | Mid band — upward amount |
+| Mid Dn Thr   | −80…0 dB    | −25 dB   | Mid band — downward threshold |
+| Mid Dn Ratio | 0–100%      | 86%      | Mid band — downward amount |
+| Mid Gain     | −30…+30 dB  | 11.7 dB  | Mid band — makeup gain |
+| Hi Up Thr    | −80…0 dB    | −35 dB   | High band — upward threshold |
+| Hi Up Ratio  | −100…100%   | 80%      | High band — upward amount |
+| Hi Dn Thr    | −80…0 dB    | −30 dB   | High band — downward threshold |
+| Hi Dn Ratio  | 0–100%      | 100%     | High band — downward amount |
+| Hi Gain      | −30…+30 dB  | 16.3 dB  | High band — makeup gain |
+
+The defaults above are the classic OTT curve (inherited from vitOTTx).
 
 > **Note:** at Mix = 0% the dry signal is the crossover reconstruction (an
 > allpass cascade): it is energy-preserving but phase-rotated, matching
