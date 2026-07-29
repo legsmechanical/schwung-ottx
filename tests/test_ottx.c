@@ -262,8 +262,81 @@ static void test_chain_params(void) {
     v2_destroy_instance(inst);
 }
 
+/* vitOTTx wraps every DSP-facing param in a 5 Hz SmoothValue; the port must
+ * ramp rather than jump, and must still converge exactly on the target. */
+static void test_smoothing(void) {
+    ottx_t *inst = (ottx_t *)v2_create_instance(NULL, NULL);
+
+    /* A fresh instance starts AT its defaults, not ramping up from zero. */
+    CHECK_NEAR(inst->sm_use[SM_MGAIN], 11.7f, 1e-3f, "smoothers snap to defaults on create");
+
+    float in[OTTX_MAXBLK] = {0}, out[OTTX_MAXBLK];
+    v2_set_param(inst, "mgain", "0");
+
+    /* set_param alone must not move the value the DSP reads... */
+    CHECK_NEAR(inst->sm_use[SM_MGAIN], 11.7f, 1e-3f, "set_param does not jump the smoothed value");
+
+    /* ...and one block must only take a fraction of the way there. */
+    ottx_process_channel(inst, 0, in, out, 128);
+    CHECK(inst->sm_use[SM_MGAIN] > 10.0f && inst->sm_use[SM_MGAIN] < 11.7f,
+          "one block ramps partway toward the new target");
+
+    /* ~30 ms (a few hundred blocks) later it has landed exactly. */
+    for (int blk = 0; blk < 400; blk++) ottx_process_channel(inst, 0, in, out, 128);
+    CHECK(inst->sm_use[SM_MGAIN] == 0.0f, "smoother converges exactly on the target");
+
+    /* Crossover coefficients track the SMOOTHED frequency, not the raw param. */
+    v2_set_param(inst, "low_cross", "1000");
+    ottx_process_channel(inst, 0, in, out, 128);
+    CHECK(inst->c_low.cutoff > 120.0f && inst->c_low.cutoff < 1000.0f,
+          "crossover coefficients follow the smoothed frequency");
+    for (int blk = 0; blk < 400; blk++) ottx_process_channel(inst, 0, in, out, 128);
+    CHECK_NEAR(inst->c_low.cutoff, 1000.0f, 1e-2f, "crossover lands on the target frequency");
+
+    /* A patch recall replaces everything at once — that must not smear. */
+    v2_set_param(inst, "state", "{\"mgain\":5.0,\"low_cross\":300.0}");
+    CHECK_NEAR(inst->sm_use[SM_MGAIN], 5.0f, 1e-3f, "state restore snaps (no ramp across a recall)");
+    CHECK_NEAR(inst->c_low.cutoff, 300.0f, 1e-2f, "state restore snaps the crossover too");
+
+    v2_destroy_instance(inst);
+}
+
+/* MultibandCompressor::processWithInput has four branches; a crossover pinned
+ * to one end drops a band rather than filtering at 20 Hz / 18 kHz. */
+static void test_collapse_modes(void) {
+    struct { const char *lc, *hc; int mode; const char *label; } cases[] = {
+        {"120", "2500",  OTTX_MODE_MULTI,  "120/2500 -> kMultiband"},
+        {"120", "18000", OTTX_MODE_LOW,    "mid/high pinned -> kLowBand"},
+        {"20",  "2500",  OTTX_MODE_HIGH,   "low/mid pinned -> kHighBand"},
+        {"20",  "18000", OTTX_MODE_SINGLE, "both pinned -> kSingleBand"},
+    };
+    for (unsigned c = 0; c < sizeof(cases) / sizeof(*cases); c++) {
+        ottx_t *inst = (ottx_t *)v2_create_instance(NULL, NULL);
+        v2_set_param(inst, "low_cross", cases[c].lc);
+        v2_set_param(inst, "high_cross", cases[c].hc);
+        CHECK(inst->mode == cases[c].mode, cases[c].label);
+
+        /* every branch must stay finite and actually pass signal */
+        float in[OTTX_MAXBLK], out[OTTX_MAXBLK];
+        int finite = 1; double oe = 0;
+        for (int blk = 0; blk < 400; blk++) {
+            for (int i = 0; i < 64; i++) {
+                float t = (blk * 64 + i) / OTTX_SR;
+                in[i] = 0.15f * (sinf(2*(float)M_PI*60*t) + sinf(2*(float)M_PI*900*t)
+                               + sinf(2*(float)M_PI*6000*t)) / 3.0f;
+            }
+            ottx_process_channel(inst, 0, in, out, 64);
+            for (int i = 0; i < 64; i++) { if (!isfinite(out[i])) finite = 0; if (blk > 200) oe += out[i]*out[i]; }
+        }
+        CHECK(finite && oe > 0.0, "collapse branch is finite and passes audio");
+        v2_destroy_instance(inst);
+    }
+}
+
 int main(void) {
     test_fastmath();
+    test_smoothing();
+    test_collapse_modes();
     test_lr_filter();
     test_passthrough_when_dry();
     test_bypass();
