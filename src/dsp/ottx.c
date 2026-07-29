@@ -33,6 +33,10 @@
 #define OTTX_MIN_ENV     5.0f
 #define OTTX_SQRT2       1.41421356237309504880f
 
+/* SmoothValue::kSmoothCutoff — the 5 Hz one-pole vitOTTx wraps every
+ * DSP-facing parameter in (vital_dsp/utilities/smooth_value.cpp). */
+#define OTTX_SMOOTH_HZ   5.0f
+
 /* Per-band base attack/release in ms (from compressor.cpp constants). */
 #define OTTX_LOW_ATT  2.8f
 #define OTTX_LOW_REL  40.0f
@@ -104,6 +108,12 @@ static inline float vp_log2(float value) {
 static inline float vp_exp(float x)            { return vp_exp2(x * OTTX_EXP_CONV_MULT); }
 static inline float vp_pow(float base, float e){ return vp_exp2(vp_log2(base) * e); }
 static inline float vp_db_to_magnitude(float db){ return vp_exp2(db * OTTX_DB_MAG_MULT); }
+
+/* utils::dbToMagnitude — the EXACT libm form (framework/utils.h). vitOTTx uses
+ * this one, not the futils approximation, for the plugin-level in/out trims
+ * (PluginProcessor::readAudio / writeAudio). The band gains inside Compressor
+ * still use the approximate vp_db_to_magnitude, matching upstream. */
+static inline float exact_db_to_magnitude(float db) { return powf(10.0f, db * 0.05f); }
 static inline float vp_mul_add(float a, float b, float c) { return a + b * c; }
 static inline float vp_interpolate(float from, float to, float t) { return from + t * (to - from); }
 
@@ -262,6 +272,27 @@ static void comp_scale(comp_state_t *st, const float *dry, const float *comp,
     }
 }
 
+/* ===== Parameter smoothing (vital_dsp/utilities/smooth_value.cpp) =====
+ * vitOTTx plugs every DSP-facing parameter into a vital::SmoothValue and calls
+ * process() once per sub-block; the consumers then read at(0)/access(0), i.e.
+ * the smoothed value ONE sample into the block. Without this the shadow UI's
+ * discrete encoder detents land as instantaneous coefficient/ratio jumps —
+ * measured at ~28% of peak for one 0.02 "depth" step and +4.9 dB of overshoot
+ * for one 10 Hz crossover step — which is audible as a click per detent and as
+ * a continuous zipper under Master-FX LFO modulation.
+ *
+ * Note the ratio slots hold the EFFECTIVE ratios (raw * depth * upward|downward),
+ * matching updParams(): vitOTTx smooths the product, not the macros. */
+enum {
+    SM_LU_THRES, SM_LL_THRES, SM_BU_THRES, SM_BL_THRES, SM_HU_THRES, SM_HL_THRES,
+    SM_LU_RATIO, SM_LL_RATIO, SM_BU_RATIO, SM_BL_RATIO, SM_HU_RATIO, SM_HL_RATIO,
+    SM_ATT, SM_REL,
+    SM_LGAIN, SM_MGAIN, SM_HGAIN,
+    SM_LOW_CROSS, SM_HIGH_CROSS,
+    SM_MIX,
+    SM_COUNT
+};
+
 /* ---- instance ---- */
 typedef struct {
     float sr;
@@ -275,10 +306,16 @@ typedef struct {
     float hl_thres, hu_thres, hl_ratio, hu_ratio;   /* high band */
     int bypass;
 
-    /* derived crossover coefficients */
+    /* smoothed parameter state: sm_cur is the one-pole state carried across
+     * blocks, sm_use is what this block's DSP actually reads. */
+    float sm_cur[SM_COUNT];
+    float sm_use[SM_COUNT];
+
+    /* derived crossover coefficients (recomputed per block from the SMOOTHED
+     * crossover frequencies, on the audio thread — see ottx_smooth_block) */
     lr_coeffs_t c_low;   /* low/mid crossover */
     lr_coeffs_t c_high;  /* mid/high crossover */
-    int mode;            /* 0 multiband, 3 singleband (see OTTX_MODE_*) */
+    int mode;            /* see OTTX_MODE_* */
     int prev_mode;
 
     /* per-channel filter + compressor state [0]=L [1]=R */
@@ -292,8 +329,11 @@ typedef struct {
     float comp_scratch[OTTX_MAXBLK];
 } ottx_t;
 
-#define OTTX_MODE_MULTI  0
-#define OTTX_MODE_SINGLE 3
+/* MultibandCompressor::BandOptions (compressor.h) — same ordering/semantics. */
+#define OTTX_MODE_MULTI  0   /* kMultiband:  low | mid | high                  */
+#define OTTX_MODE_LOW    1   /* kLowBand:    low | mid   (mid/high collapsed)  */
+#define OTTX_MODE_HIGH   2   /* kHighBand:   mid | high  (low/mid collapsed)   */
+#define OTTX_MODE_SINGLE 3   /* kSingleBand: one band, mid settings            */
 
 static void v2_log(const char *msg) {
     if (g_host && g_host->log) {
@@ -301,8 +341,9 @@ static void v2_log(const char *msg) {
     }
 }
 
-/* forward decls filled in later tasks */
 static void ottx_update_derived(ottx_t *inst);
+static void ottx_smooth_targets(const ottx_t *inst, float *t);
+static void ottx_smooth_snap(ottx_t *inst);
 static void ottx_process_channel(ottx_t *inst, int ch, const float *in, float *out, int n);
 
 static void ottx_set_defaults(ottx_t *inst) {
@@ -326,6 +367,7 @@ static void *v2_create_instance(const char *module_dir, const char *config_json)
     if (!inst) return NULL;
     ottx_set_defaults(inst);
     ottx_update_derived(inst);
+    ottx_smooth_snap(inst);
     return inst;
 }
 
@@ -339,8 +381,10 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
 
     ottx_set_flush_denormals();
 
-    float in_mag  = vp_db_to_magnitude(clampf(inst->in_gain,  -60.0f, 30.0f));
-    float out_mag = vp_db_to_magnitude(clampf(inst->out_gain, -60.0f, 30.0f));
+    /* readAudio/writeAudio use the exact utils::dbToMagnitude, and vitOTTx does
+     * NOT smooth these two — they're read raw off the parameter each block. */
+    float in_mag  = exact_db_to_magnitude(clampf(inst->in_gain,  -60.0f, 30.0f));
+    float out_mag = exact_db_to_magnitude(clampf(inst->out_gain, -60.0f, 30.0f));
 
     for (int off = 0; off < frames; ) {
         int n = frames - off;
@@ -388,6 +432,9 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         OTTX_RESTORE("hl_ratio", hl_ratio); OTTX_RESTORE("hu_ratio", hu_ratio);
         #undef OTTX_RESTORE
         ottx_update_derived(p);
+        /* A patch recall replaces every parameter at once; ramping there would
+         * just smear the old patch into the new one for ~30 ms. */
+        ottx_smooth_snap(p);
         return;
     }
     float v = (float)atof(val);
@@ -547,96 +594,186 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     return -1;
 }
 
-/* Effective per-band ratios after the OTT macro mapping (depth/upward/downward). */
-typedef struct {
-    float ll, lu, bl, bu, hl, hu;   /* low/mid/high lower(upward) + upper(downward) */
-} ottx_eff_ratios_t;
-
-static ottx_eff_ratios_t ottx_eff_ratios(const ottx_t *p) {
-    ottx_eff_ratios_t r;
+/* Smoothing targets straight off the raw params, in SM_* slot order. Mirrors
+ * VitOttAudioProcessor::updParams() — including the lf > hf clamp and the
+ * ratio * depth * upward|downward products. */
+static void ottx_smooth_targets(const ottx_t *p, float *t) {
+    float lf = p->low_cross, hf = p->high_cross;
+    if (lf > hf) lf = hf;
     float d = p->depth, up = p->upward, dn = p->downward;
-    r.ll = p->ll_ratio * d * up;  r.lu = p->lu_ratio * d * dn;
-    r.bl = p->bl_ratio * d * up;  r.bu = p->bu_ratio * d * dn;
-    r.hl = p->hl_ratio * d * up;  r.hu = p->hu_ratio * d * dn;
-    return r;
+
+    t[SM_LU_THRES] = p->lu_thres;  t[SM_LL_THRES] = p->ll_thres;
+    t[SM_BU_THRES] = p->bu_thres;  t[SM_BL_THRES] = p->bl_thres;
+    t[SM_HU_THRES] = p->hu_thres;  t[SM_HL_THRES] = p->hl_thres;
+
+    t[SM_LU_RATIO] = p->lu_ratio * d * dn;  t[SM_LL_RATIO] = p->ll_ratio * d * up;
+    t[SM_BU_RATIO] = p->bu_ratio * d * dn;  t[SM_BL_RATIO] = p->bl_ratio * d * up;
+    t[SM_HU_RATIO] = p->hu_ratio * d * dn;  t[SM_HL_RATIO] = p->hl_ratio * d * up;
+
+    t[SM_ATT] = p->att_time;  t[SM_REL] = p->rel_time;
+    t[SM_LGAIN] = p->lgain;   t[SM_MGAIN] = p->mgain;  t[SM_HGAIN] = p->hgain;
+    t[SM_LOW_CROSS] = lf;     t[SM_HIGH_CROSS] = hf;
+    t[SM_MIX] = p->mix;
 }
 
-/* Recompute crossover coefficients + collapse mode from current params. */
+/* setHard: jump the smoothers to their targets with no ramp. Used at instance
+ * creation and on "state" restore, where a ramp would just be a load artifact.
+ * (vitOTTx constructs its SmoothValues at 0 and audibly ramps up from there on
+ * the first block; snapping is the one intentional improvement over upstream.) */
+static void ottx_smooth_snap(ottx_t *inst) {
+    ottx_smooth_targets(inst, inst->sm_cur);
+    memcpy(inst->sm_use, inst->sm_cur, sizeof(inst->sm_use));
+    lr_coeffs(&inst->c_low,  inst->sm_use[SM_LOW_CROSS],  inst->sr);
+    lr_coeffs(&inst->c_high, inst->sm_use[SM_HIGH_CROSS], inst->sr);
+}
+
+/* Advance every smoother by one sub-block and publish this block's values.
+ *
+ * SmoothValue::process fills a buffer by iterating a one-pole n times, and the
+ * consumers read element 0 — so the value USED is one sample of decay past the
+ * previous block's state, while the state itself advances the full n samples.
+ * decay^n reproduces the iterated loop exactly (and cheaply).
+ *
+ * Called once per block from ottx_process_channel's ch == 0 pass, so a stereo
+ * block advances the smoothers once, not twice. */
+static void ottx_smooth_block(ottx_t *inst, int n) {
+    float tgt[SM_COUNT];
+    ottx_smooth_targets(inst, tgt);
+
+    const float k = -2.0f * (float)M_PI * OTTX_SMOOTH_HZ / inst->sr;
+    float decay1 = vp_exp(k);
+    float decayn = vp_exp(k * (float)n);
+
+    for (int i = 0; i < SM_COUNT; i++) {
+        float delta = inst->sm_cur[i] - tgt[i];
+        inst->sm_use[i] = tgt[i] + decay1 * delta;
+        float next = tgt[i] + decayn * delta;
+        /* SmoothValue's linearInterpolate fallback exists to guarantee the ramp
+         * actually lands; a scale-aware snap is the same guarantee, and it also
+         * lets the coefficient recompute below go quiet at rest. */
+        if (fabsf(next - tgt[i]) < 1e-5f * (fabsf(tgt[i]) + 1.0f)) {
+            next = tgt[i];
+            inst->sm_use[i] = tgt[i];
+        }
+        inst->sm_cur[i] = next;
+    }
+
+    /* LinkwitzRileyFilter::computeCoefficients runs per block off the smoothed
+     * frequency. Skip the two tanf calls when nothing moved (the steady state). */
+    if (inst->sm_use[SM_LOW_CROSS] != inst->c_low.cutoff)
+        lr_coeffs(&inst->c_low, inst->sm_use[SM_LOW_CROSS], inst->sr);
+    if (inst->sm_use[SM_HIGH_CROSS] != inst->c_high.cutoff)
+        lr_coeffs(&inst->c_high, inst->sm_use[SM_HIGH_CROSS], inst->sr);
+}
+
+/* Collapse mode from the current params. Cheap and allocation-free, so it can
+ * stay on the set_param path; the crossover coefficients it used to compute
+ * moved to ottx_smooth_block (off the UI thread, and smoothed). */
 static void ottx_update_derived(ottx_t *inst) {
     float lf = inst->low_cross, hf = inst->high_cross;
     if (lf > hf) lf = hf;
-    lr_coeffs(&inst->c_low,  lf, inst->sr);
-    lr_coeffs(&inst->c_high, hf, inst->sr);
 
     int low_collapsed  = (lf <= 21.0f);
     int high_collapsed = (hf >= 17500.0f);
-    /* v1: full multiband unless BOTH crossovers collapse -> singleband (mid settings). */
-    inst->mode = (low_collapsed && high_collapsed) ? OTTX_MODE_SINGLE : OTTX_MODE_MULTI;
+    if (low_collapsed && high_collapsed) inst->mode = OTTX_MODE_SINGLE;
+    else if (low_collapsed)              inst->mode = OTTX_MODE_HIGH;
+    else if (high_collapsed)             inst->mode = OTTX_MODE_LOW;
+    else                                 inst->mode = OTTX_MODE_MULTI;
+}
+
+/* Run one band: compress it, then accumulate its scaled/mixed result into out. */
+static void ottx_run_band(ottx_t *inst, comp_state_t *st, const float *band, float *out, int n,
+                          float base_att, float base_rel,
+                          int sm_upper_thres, int sm_lower_thres,
+                          int sm_upper_ratio, int sm_lower_ratio, int sm_gain) {
+    const float *s = inst->sm_use;
+    comp_rms(st, band, inst->comp_scratch, n, base_att, base_rel,
+             s[SM_ATT], s[SM_REL],
+             s[sm_upper_thres], s[sm_lower_thres],
+             s[sm_upper_ratio], s[sm_lower_ratio], inst->sr);
+    comp_scale(st, band, inst->comp_scratch, out, n, s[sm_gain], s[SM_MIX], inst->sr);
 }
 
 /* Process one channel's block (float in [-1,1]) -> float out. */
 static void ottx_process_channel(ottx_t *inst, int ch, const float *in, float *out, int n) {
     if (n > OTTX_MAXBLK) n = OTTX_MAXBLK;  /* scratch buffers are OTTX_MAXBLK; callers chunk, but guard anyway */
-    if (inst->mode != inst->prev_mode) {
-        memset(inst->f1, 0, sizeof(inst->f1));
-        memset(inst->f2lo, 0, sizeof(inst->f2lo));
-        memset(inst->f3hi, 0, sizeof(inst->f3hi));
-        memset(inst->low_c, 0, sizeof(inst->low_c));
-        memset(inst->mid_c, 0, sizeof(inst->mid_c));
-        memset(inst->high_c, 0, sizeof(inst->high_c));
-        inst->prev_mode = inst->mode;
-    }
 
-    ottx_eff_ratios_t er = ottx_eff_ratios(inst);
-
-    if (inst->mode == OTTX_MODE_SINGLE) {
-        /* one compressor (mid settings) on the full signal */
-        comp_rms(&inst->mid_c[ch], in, inst->comp_scratch, n,
-                 OTTX_MID_ATT, OTTX_MID_REL, inst->att_time, inst->rel_time,
-                 inst->bu_thres, inst->bl_thres, er.bu, er.bl, inst->sr);
-        for (int i = 0; i < n; i++) out[i] = 0.0f;
-        comp_scale(&inst->mid_c[ch], in, inst->comp_scratch, out, n, inst->mgain, inst->mix, inst->sr);
-        return;
-    }
-
-    /* --- split into 3 bands (faithful to MultibandCompressor lane logic) --- */
-    for (int i = 0; i < n; i++) {
-        float x = in[i];
-        float lowA, highA;
-        lr_process(&inst->f1[ch], &inst->c_low, x, &lowA, &highA);
-
-        float llp, lhp;
-        lr_process(&inst->f2lo[ch], &inst->c_high, lowA, &llp, &lhp);
-        inst->band_low[i] = llp + lhp;     /* phase-comp reconstruction of LOW */
-
-        float mlp, mhp;
-        lr_process(&inst->f3hi[ch], &inst->c_high, highA, &mlp, &mhp);
-        inst->band_mid[i] = mlp;
-        inst->band_high[i] = mhp;
+    /* Both the mode reset and the smoother advance are per-BLOCK, not per-channel,
+     * so they hang off the ch == 0 pass. v2_process_block always runs ch 0 then
+     * ch 1 over the same sub-block, and the reset below clears both channels. */
+    if (ch == 0) {
+        if (inst->mode != inst->prev_mode) {
+            memset(inst->f1, 0, sizeof(inst->f1));
+            memset(inst->f2lo, 0, sizeof(inst->f2lo));
+            memset(inst->f3hi, 0, sizeof(inst->f3hi));
+            memset(inst->low_c, 0, sizeof(inst->low_c));
+            memset(inst->mid_c, 0, sizeof(inst->mid_c));
+            memset(inst->high_c, 0, sizeof(inst->high_c));
+            inst->prev_mode = inst->mode;
+        }
+        ottx_smooth_block(inst, n);
     }
 
     for (int i = 0; i < n; i++) out[i] = 0.0f;
 
-    /* LOW band */
-    comp_rms(&inst->low_c[ch], inst->band_low, inst->comp_scratch, n,
-             OTTX_LOW_ATT, OTTX_LOW_REL, inst->att_time, inst->rel_time,
-             inst->lu_thres, inst->ll_thres, er.lu, er.ll, inst->sr);
-    comp_scale(&inst->low_c[ch], inst->band_low, inst->comp_scratch, out, n,
-               inst->lgain, inst->mix, inst->sr);
+    /* Band layout per mode, mirroring MultibandCompressor::processWithInput's
+     * four branches. Which compressor each band gets — and therefore which
+     * attack/release constants and which threshold/ratio/gain set — follows the
+     * poly-lane packing upstream uses, NOT the band's position on the spectrum. */
+    switch (inst->mode) {
 
-    /* MID band */
-    comp_rms(&inst->mid_c[ch], inst->band_mid, inst->comp_scratch, n,
-             OTTX_MID_ATT, OTTX_MID_REL, inst->att_time, inst->rel_time,
-             inst->bu_thres, inst->bl_thres, er.bu, er.bl, inst->sr);
-    comp_scale(&inst->mid_c[ch], inst->band_mid, inst->comp_scratch, out, n,
-               inst->mgain, inst->mix, inst->sr);
+    case OTTX_MODE_SINGLE:
+        /* kSingleBand: one compressor on the full signal, mid ("band") settings. */
+        ottx_run_band(inst, &inst->mid_c[ch], in, out, n, OTTX_MID_ATT, OTTX_MID_REL,
+                      SM_BU_THRES, SM_BL_THRES, SM_BU_RATIO, SM_BL_RATIO, SM_MGAIN);
+        return;
 
-    /* HIGH band */
-    comp_rms(&inst->high_c[ch], inst->band_high, inst->comp_scratch, n,
-             OTTX_HIGH_ATT, OTTX_HIGH_REL, inst->att_time, inst->rel_time,
-             inst->hu_thres, inst->hl_thres, er.hu, er.hl, inst->sr);
-    comp_scale(&inst->high_c[ch], inst->band_high, inst->comp_scratch, out, n,
-               inst->hgain, inst->mix, inst->sr);
+    case OTTX_MODE_LOW:
+        /* kLowBand: mid/high crossover is collapsed, so one split at low_cross
+         * gives LOW (low settings) + everything above it (mid settings). */
+        for (int i = 0; i < n; i++)
+            lr_process(&inst->f1[ch], &inst->c_low, in[i], &inst->band_low[i], &inst->band_mid[i]);
+        ottx_run_band(inst, &inst->low_c[ch], inst->band_low, out, n, OTTX_LOW_ATT, OTTX_LOW_REL,
+                      SM_LU_THRES, SM_LL_THRES, SM_LU_RATIO, SM_LL_RATIO, SM_LGAIN);
+        ottx_run_band(inst, &inst->mid_c[ch], inst->band_mid, out, n, OTTX_MID_ATT, OTTX_MID_REL,
+                      SM_BU_THRES, SM_BL_THRES, SM_BU_RATIO, SM_BL_RATIO, SM_MGAIN);
+        return;
+
+    case OTTX_MODE_HIGH:
+        /* kHighBand: low/mid crossover is collapsed, so one split at high_cross
+         * gives everything below it (mid settings) + HIGH (high settings). */
+        for (int i = 0; i < n; i++)
+            lr_process(&inst->f1[ch], &inst->c_high, in[i], &inst->band_mid[i], &inst->band_high[i]);
+        ottx_run_band(inst, &inst->mid_c[ch], inst->band_mid, out, n, OTTX_MID_ATT, OTTX_MID_REL,
+                      SM_BU_THRES, SM_BL_THRES, SM_BU_RATIO, SM_BL_RATIO, SM_MGAIN);
+        ottx_run_band(inst, &inst->high_c[ch], inst->band_high, out, n, OTTX_HIGH_ATT, OTTX_HIGH_REL,
+                      SM_HU_THRES, SM_HL_THRES, SM_HU_RATIO, SM_HL_RATIO, SM_HGAIN);
+        return;
+
+    default: /* OTTX_MODE_MULTI */
+        /* kMultiband: split at low_cross, then run BOTH streams through the
+         * mid/high crossover. The low stream's two halves are summed back
+         * together (phase compensation); the high stream's halves are the mid
+         * and high bands. */
+        for (int i = 0; i < n; i++) {
+            float lowA, highA;
+            lr_process(&inst->f1[ch], &inst->c_low, in[i], &lowA, &highA);
+
+            float llp, lhp;
+            lr_process(&inst->f2lo[ch], &inst->c_high, lowA, &llp, &lhp);
+            inst->band_low[i] = llp + lhp;     /* phase-comp reconstruction of LOW */
+
+            lr_process(&inst->f3hi[ch], &inst->c_high, highA,
+                       &inst->band_mid[i], &inst->band_high[i]);
+        }
+        ottx_run_band(inst, &inst->low_c[ch], inst->band_low, out, n, OTTX_LOW_ATT, OTTX_LOW_REL,
+                      SM_LU_THRES, SM_LL_THRES, SM_LU_RATIO, SM_LL_RATIO, SM_LGAIN);
+        ottx_run_band(inst, &inst->mid_c[ch], inst->band_mid, out, n, OTTX_MID_ATT, OTTX_MID_REL,
+                      SM_BU_THRES, SM_BL_THRES, SM_BU_RATIO, SM_BL_RATIO, SM_MGAIN);
+        ottx_run_band(inst, &inst->high_c[ch], inst->band_high, out, n, OTTX_HIGH_ATT, OTTX_HIGH_REL,
+                      SM_HU_THRES, SM_HL_THRES, SM_HU_RATIO, SM_HL_RATIO, SM_HGAIN);
+        return;
+    }
 }
 
 #ifndef OTTX_TEST
