@@ -2,7 +2,7 @@
   "id": "ottx",
   "name": "OTTx",
   "abbrev": "OTTX",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "3-band multiband upward+downward compressor (vitOTTx port)",
   "author": "Schwung OTTx port; DSP by Matt Tytel (Vital), Yegor Suslin (vitOTT)",
   "dsp": "ottx.so",
