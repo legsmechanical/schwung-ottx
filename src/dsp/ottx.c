@@ -33,6 +33,23 @@
 #define OTTX_MIN_ENV     5.0f
 #define OTTX_SQRT2       1.41421356237309504880f
 
+/* Upward-expansion noise floor — the one DSP divergence from vitOTTx.
+ * Upstream runs on float audio, where "nothing playing" is exact 0.0 and tails
+ * decay to ~-150 dB. The Move hands us int16, so tails and upstream residue
+ * stall at +-1 LSB instead, and upstream's +30 dB expansion cap plus the band
+ * makeup gain turns that into -46 dBFS of hiss. So a band's upward gain fades
+ * in from 0 dB at FLOOR_START above the int16 LSB to full strength at
+ * FLOOR_FULL above it; past that the curve is bit-identical to upstream.
+ * "tame" shifts that floor: up to TAME_MAX dB higher for sources whose own
+ * noise (lo-fi reverbs, tape/bitcrush hiss) sits well above the int16 LSB, or
+ * down to TAME_MIN, which switches the floor off entirely (bit-identical to
+ * upstream vitOTTx). */
+#define OTTX_LSB_DB         (-90.3089987f)  /* 20*log10(1/32768) */
+#define OTTX_FLOOR_START_DB 6.0f
+#define OTTX_FLOOR_FULL_DB  18.0f
+#define OTTX_TAME_MIN_DB    (-12.0f)
+#define OTTX_TAME_MAX_DB    12.0f
+
 /* SmoothValue::kSmoothCutoff — the 5 Hz one-pole vitOTTx wraps every
  * DSP-facing parameter in (vital_dsp/utilities/smooth_value.cpp). */
 #define OTTX_SMOOTH_HZ   5.0f
@@ -196,7 +213,7 @@ static void comp_rms(comp_state_t *st, const float *in, float *out, int n,
                      float base_att_ms, float base_rel_ms,
                      float att_time, float rel_time,
                      float upper_thres_db, float lower_thres_db,
-                     float upper_ratio, float lower_ratio, float sr) {
+                     float upper_ratio, float lower_ratio, float floor_db, float sr) {
     float spm = sr / 1000.0f;
     float att_mult = base_att_ms * spm;
     float rel_mult = base_rel_ms * spm;
@@ -217,6 +234,11 @@ static void comp_rms(comp_state_t *st, const float *in, float *out, int n,
     float ur = clampf(upper_ratio, 0.0f, 1.0f) * 0.5f;
     float lr = clampf(lower_ratio, -1.0f, 1.0f) * 0.5f;
 
+    /* Noise-floor fade window in log2(power): dB * log2(10) / 10. */
+    const float db_to_log2p = 0.33219281f;
+    float floor_lo = (floor_db + OTTX_FLOOR_START_DB) * db_to_log2p;
+    float floor_inv = 1.0f / ((OTTX_FLOOR_FULL_DB - OTTX_FLOOR_START_DB) * db_to_log2p);
+
     float henv = st->high_env, lenv = st->low_env;
     for (int i = 0; i < n; i++) {
         float s = in[i];
@@ -234,7 +256,17 @@ static void comp_rms(comp_state_t *st, const float *in, float *out, int n,
         if (sq > lenv) { ls = env_att; lsc = att_scale; } else { ls = env_rel; lsc = rel_scale; }
         lenv = (sq + lenv * ls) * lsc;
         if (lenv > lt) lenv = lt;
-        float lower_mult = vp_pow(lt / lenv, lr);
+        /* Only a boosting ratio fades; a negative (downward-expanding) one is
+         * already pushing noise down. vp_log2(0) is ~-127, so silence -> w = 0. */
+        float lrw = lr;
+        if (lr > 0.0f) {
+            float w = (vp_log2(lenv) - floor_lo) * floor_inv;
+            if (w < 1.0f) {
+                w = clampf(w, 0.0f, 1.0f);
+                lrw = lr * (w * w * (3.0f - 2.0f * w));   /* smoothstep */
+            }
+        }
+        float lower_mult = vp_pow(lt / lenv, lrw);
 
         /* lenv is only capped (not floored), so on pure silence lenv can be 0 and
          * lt/lenv = +inf -> lower_mult is a huge finite value. The MAX_EXPAND clamp
@@ -290,6 +322,7 @@ enum {
     SM_LGAIN, SM_MGAIN, SM_HGAIN,
     SM_LOW_CROSS, SM_HIGH_CROSS,
     SM_MIX,
+    SM_TAME,
     SM_COUNT
 };
 
@@ -304,7 +337,12 @@ typedef struct {
     float ll_thres, lu_thres, ll_ratio, lu_ratio;   /* low band */
     float bl_thres, bu_thres, bl_ratio, bu_ratio;   /* mid (band) */
     float hl_thres, hu_thres, hl_ratio, hu_ratio;   /* high band */
+    float tame;                                     /* noise-floor lift, dB (OTTx-only) */
     int bypass;
+
+    /* Expansion noise floor in the processing domain: the int16 LSB after
+     * In Gain, so boosting the input moves the floor with it. */
+    float floor_db;
 
     /* smoothed parameter state: sm_cur is the one-pole state carried across
      * blocks, sm_use is what this block's DSP actually reads. */
@@ -357,6 +395,8 @@ static void ottx_set_defaults(ottx_t *inst) {
     inst->bl_thres = -36.0f; inst->bu_thres = -25.0f; inst->bl_ratio = 0.8f; inst->bu_ratio = 0.857f;
     inst->hl_thres = -35.0f; inst->hu_thres = -30.0f; inst->hl_ratio = 0.8f; inst->hu_ratio = 1.0f;
     inst->bypass = 0;
+    inst->floor_db = OTTX_LSB_DB;
+    inst->tame = 0.0f;
     inst->mode = OTTX_MODE_MULTI;
     inst->prev_mode = OTTX_MODE_MULTI;
 }
@@ -385,6 +425,7 @@ static void v2_process_block(void *instance, int16_t *audio_inout, int frames) {
      * NOT smooth these two — they're read raw off the parameter each block. */
     float in_mag  = exact_db_to_magnitude(clampf(inst->in_gain,  -60.0f, 30.0f));
     float out_mag = exact_db_to_magnitude(clampf(inst->out_gain, -60.0f, 30.0f));
+    inst->floor_db = OTTX_LSB_DB + clampf(inst->in_gain, -60.0f, 30.0f);
 
     for (int off = 0; off < frames; ) {
         int n = frames - off;
@@ -430,6 +471,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         OTTX_RESTORE("bl_ratio", bl_ratio); OTTX_RESTORE("bu_ratio", bu_ratio);
         OTTX_RESTORE("hl_thres", hl_thres); OTTX_RESTORE("hu_thres", hu_thres);
         OTTX_RESTORE("hl_ratio", hl_ratio); OTTX_RESTORE("hu_ratio", hu_ratio);
+        OTTX_RESTORE("tame", tame);
         #undef OTTX_RESTORE
         ottx_update_derived(p);
         /* A patch recall replaces every parameter at once; ramping there would
@@ -464,6 +506,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     else if (strcmp(key, "hu_thres") == 0)   p->hu_thres = v;
     else if (strcmp(key, "hl_ratio") == 0)   p->hl_ratio = v;
     else if (strcmp(key, "hu_ratio") == 0)   p->hu_ratio = v;
+    else if (strcmp(key, "tame") == 0)       p->tame = v;
     else if (strcmp(key, "bypass") == 0)     p->bypass = (v >= 0.5f) ? 1 : 0;
     else return;
     ottx_update_derived(p);
@@ -485,6 +528,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     OTTX_GET("bl_ratio", bl_ratio); OTTX_GET("bu_ratio", bu_ratio);
     OTTX_GET("hl_thres", hl_thres); OTTX_GET("hu_thres", hu_thres);
     OTTX_GET("hl_ratio", hl_ratio); OTTX_GET("hu_ratio", hu_ratio);
+    OTTX_GET("tame", tame);
     #undef OTTX_GET
 
     /* "time" is a write-macro that sets att_time + rel_time together. The shadow
@@ -510,6 +554,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             {"time","Time","%",0.0f,1.0f,0.5f,0.02f},
             {"in_gain","In Gain","dB",-60.0f,30.0f,0.0f,0.5f},
             {"out_gain","Out Gain","dB",-60.0f,30.0f,0.0f,0.5f},
+            {"tame","Tame","dB",OTTX_TAME_MIN_DB,OTTX_TAME_MAX_DB,0.0f,1.0f},
             {"low_cross","Low/Mid Hz","Hz",20.0f,18000.0f,120.0f,10.0f},
             {"high_cross","Mid/Hi Hz","Hz",20.0f,18000.0f,2500.0f,10.0f},
             {"att_time","Attack","%",0.0f,1.0f,0.5f,0.02f},
@@ -553,13 +598,13 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             "\"low_cross\":%.4f,\"high_cross\":%.4f,\"lgain\":%.4f,\"mgain\":%.4f,\"hgain\":%.4f,"
             "\"ll_thres\":%.4f,\"lu_thres\":%.4f,\"ll_ratio\":%.4f,\"lu_ratio\":%.4f,"
             "\"bl_thres\":%.4f,\"bu_thres\":%.4f,\"bl_ratio\":%.4f,\"bu_ratio\":%.4f,"
-            "\"hl_thres\":%.4f,\"hu_thres\":%.4f,\"hl_ratio\":%.4f,\"hu_ratio\":%.4f}",
+            "\"hl_thres\":%.4f,\"hu_thres\":%.4f,\"hl_ratio\":%.4f,\"hu_ratio\":%.4f,\"tame\":%.4f}",
             p->in_gain, p->out_gain, p->mix, p->depth, p->upward, p->downward,
             p->att_time, p->rel_time, p->low_cross, p->high_cross,
             p->lgain, p->mgain, p->hgain,
             p->ll_thres, p->lu_thres, p->ll_ratio, p->lu_ratio,
             p->bl_thres, p->bu_thres, p->bl_ratio, p->bu_ratio,
-            p->hl_thres, p->hu_thres, p->hl_ratio, p->hu_ratio);
+            p->hl_thres, p->hu_thres, p->hl_ratio, p->hu_ratio, p->tame);
     }
 
     if (strcmp(key, "ui_hierarchy") == 0) {
@@ -567,11 +612,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             "{\"modes\":null,\"levels\":{"
               "\"root\":{"
                 "\"children\":null,"
-                "\"knobs\":[\"mix\",\"depth\",\"upward\",\"downward\",\"time\",\"in_gain\",\"out_gain\"],"
+                "\"knobs\":[\"mix\",\"depth\",\"upward\",\"downward\",\"time\",\"in_gain\",\"out_gain\",\"tame\"],"
                 /* The Advanced submenu link MUST be a {"level":...} entry inside
                  * params — the shadow-UI renderer only navigates params entries,
                  * never a bare children[] array. */
-                "\"params\":[\"mix\",\"depth\",\"upward\",\"downward\",\"time\",\"in_gain\",\"out_gain\",\"low_cross\",\"high_cross\",{\"level\":\"advanced\",\"label\":\"Advanced\"}]"
+                "\"params\":[\"mix\",\"depth\",\"upward\",\"downward\",\"time\",\"in_gain\",\"out_gain\",\"tame\",\"low_cross\",\"high_cross\",{\"level\":\"advanced\",\"label\":\"Advanced\"}]"
               "},"
               "\"advanced\":{"
                 "\"children\":null,"
@@ -614,6 +659,7 @@ static void ottx_smooth_targets(const ottx_t *p, float *t) {
     t[SM_LGAIN] = p->lgain;   t[SM_MGAIN] = p->mgain;  t[SM_HGAIN] = p->hgain;
     t[SM_LOW_CROSS] = lf;     t[SM_HIGH_CROSS] = hf;
     t[SM_MIX] = p->mix;
+    t[SM_TAME] = clampf(p->tame, OTTX_TAME_MIN_DB, OTTX_TAME_MAX_DB);
 }
 
 /* setHard: jump the smoothers to their targets with no ramp. Used at instance
@@ -687,10 +733,14 @@ static void ottx_run_band(ottx_t *inst, comp_state_t *st, const float *band, flo
                           int sm_upper_thres, int sm_lower_thres,
                           int sm_upper_ratio, int sm_lower_ratio, int sm_gain) {
     const float *s = inst->sm_use;
+    /* Tame at its minimum = floor off: -inf makes the fade weight +inf in
+     * comp_rms, so the `w < 1` branch never runs and the ratio is untouched. */
+    float floor_db = (s[SM_TAME] <= OTTX_TAME_MIN_DB) ? -INFINITY
+                                                      : inst->floor_db + s[SM_TAME];
     comp_rms(st, band, inst->comp_scratch, n, base_att, base_rel,
              s[SM_ATT], s[SM_REL],
              s[sm_upper_thres], s[sm_lower_thres],
-             s[sm_upper_ratio], s[sm_lower_ratio], inst->sr);
+             s[sm_upper_ratio], s[sm_lower_ratio], floor_db, inst->sr);
     comp_scale(st, band, inst->comp_scratch, out, n, s[sm_gain], s[SM_MIX], inst->sr);
 }
 

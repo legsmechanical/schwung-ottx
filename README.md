@@ -33,6 +33,19 @@ the band's lower threshold; "downward" tames peaks above the upper threshold —
 together producing OTT's dense, in-your-face character. The bands are then
 recombined with per-band makeup gain and a global dry/wet mix.
 
+**Noise floor (the one DSP difference from vitOTTx).** The Move's audio is
+16-bit, so reverb tails and other residue settle at ±1 LSB instead of
+decaying to true silence the way they do in a DAW. Unchecked, upward
+compression would lift that to about −46 dBFS of high-end hiss whenever
+nothing is playing. OTTx fades the upward gain out as a band approaches the
+16-bit floor (from 18 dB above it down to 6 dB above it), and the floor
+follows **In Gain**. Anything louder than that is processed exactly as
+upstream. **Tame** moves the floor. Raise it by up to 12 dB for sources that
+carry their own hiss, such as lo-fi reverbs and bitcrushed or tape-style
+material, which would otherwise be pumped up into crackle. Lower it for
+more upward gain on very quiet material. At −12 dB the floor is switched
+off entirely, which is bit-identical to stock vitOTTx.
+
 ## Controls
 
 ### Root (the OTT macros)
@@ -48,6 +61,7 @@ These are mapped to the knobs, in this order:
 | Time       | 0–100%       | 50%     | Attack/release macro — drives both together (higher = slower) |
 | In Gain    | −60…+30 dB   | 0 dB    | Input trim |
 | Out Gain   | −60…+30 dB   | 0 dB    | Output trim |
+| Tame       | −12…+12 dB   | 0 dB    | Moves the noise floor: raise it so upward compression stops boosting a noisy source's own hiss (lo-fi reverbs, etc.); −12 turns the floor off entirely (stock vitOTTx behavior) |
 | Low/Mid Hz | 20 Hz–18 kHz | 120 Hz  | Low ↔ mid crossover frequency |
 | Mid/Hi Hz  | 20 Hz–18 kHz | 2.5 kHz | Mid ↔ high crossover frequency |
 
