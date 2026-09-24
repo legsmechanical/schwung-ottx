@@ -2,7 +2,7 @@
   "id": "ottx",
   "name": "OTTx",
   "abbrev": "OTTX",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "3-band multiband upward+downward compressor (vitOTTx port)",
   "author": "Schwung OTTx port; DSP by Matt Tytel (Vital), Yegor Suslin (vitOTT)",
   "dsp": "ottx.so",
@@ -86,6 +86,16 @@
               "unit": "dB"
             },
             {
+              "key": "tame",
+              "name": "Tame",
+              "type": "float",
+              "min": -12.0,
+              "max": 12.0,
+              "default": 0.0,
+              "step": 1.0,
+              "unit": "dB"
+            },
+            {
               "key": "low_cross",
               "name": "Low/Mid Hz",
               "type": "float",
@@ -117,7 +127,8 @@
             "downward",
             "time",
             "in_gain",
-            "out_gain"
+            "out_gain",
+            "tame"
           ]
         },
         "advanced": {

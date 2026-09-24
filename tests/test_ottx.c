@@ -109,7 +109,7 @@ static void test_compressor(void) {
     comp_state_t st; memset(&st, 0, sizeof(st));
     float in[OTTX_MAXBLK] = {0}, out[OTTX_MAXBLK] = {0};
     comp_rms(&st, in, out, 64, OTTX_MID_ATT, OTTX_MID_REL,
-             0.5f, 0.5f, -25.0f, -36.0f, 0.857f, 0.8f, OTTX_SR);
+             0.5f, 0.5f, -25.0f, -36.0f, 0.857f, 0.8f, OTTX_LSB_DB, OTTX_SR);
     int silent = 1;
     for (int i = 0; i < 64; i++) if (fabsf(out[i]) > 1e-6f) silent = 0;
     CHECK(silent, "silence in -> silence out");
@@ -121,7 +121,7 @@ static void test_compressor(void) {
         for (int i = 0; i < 64; i++)
             in[i] = 0.01f * sinf(2.0f*(float)M_PI*300.0f*(blk*64+i)/OTTX_SR); /* ~-40 dBFS */
         comp_rms(&su, in, out, 64, OTTX_MID_ATT, OTTX_MID_REL,
-                 0.5f, 0.5f, -25.0f, -36.0f, 0.857f, 0.8f, OTTX_SR);
+                 0.5f, 0.5f, -25.0f, -36.0f, 0.857f, 0.8f, OTTX_LSB_DB, OTTX_SR);
         if (blk >= 150) for (int i = 0; i < 64; i++) { quiet_in_rms += in[i]*in[i]; quiet_out_rms += out[i]*out[i]; }
     }
     CHECK(quiet_out_rms > quiet_in_rms * 1.5f, "quiet signal is boosted (upward compression)");
@@ -133,7 +133,7 @@ static void test_compressor(void) {
         for (int i = 0; i < 64; i++)
             in[i] = 0.7f * sinf(2.0f*(float)M_PI*300.0f*(blk*64+i)/OTTX_SR); /* ~-3 dBFS */
         comp_rms(&sd, in, out, 64, OTTX_MID_ATT, OTTX_MID_REL,
-                 0.5f, 0.5f, -25.0f, -36.0f, 0.857f, 0.8f, OTTX_SR);
+                 0.5f, 0.5f, -25.0f, -36.0f, 0.857f, 0.8f, OTTX_LSB_DB, OTTX_SR);
         if (blk >= 150) for (int i = 0; i < 64; i++) { loud_in_rms += in[i]*in[i]; loud_out_rms += out[i]*out[i]; }
     }
     CHECK(loud_out_rms < loud_in_rms, "loud signal is attenuated (downward compression)");
@@ -333,6 +333,67 @@ static void test_collapse_modes(void) {
     }
 }
 
+/* Run white noise of the given int16 peak (in LSBs) through a default instance
+ * and return the output RMS in dBFS, measured after the envelopes settle. */
+static float noise_out_db_tame(float in_gain_db, int lsb_peak, float tame_db) {
+    ottx_t *inst = (ottx_t *)v2_create_instance(NULL, NULL);
+    char g[16]; snprintf(g, sizeof(g), "%.1f", in_gain_db);
+    v2_set_param(inst, "in_gain", g);
+    snprintf(g, sizeof(g), "%.1f", tame_db);
+    v2_set_param(inst, "tame", g);
+    v2_set_param(inst, "state", "{}");   /* snap the smoothers */
+    srand(7);
+    int16_t buf[256]; double e = 0; int cnt = 0;
+    for (int blk = 0; blk < 700; blk++) {
+        for (int i = 0; i < 128; i++)
+            buf[2*i] = buf[2*i+1] = (int16_t)(rand() % (2*lsb_peak + 1) - lsb_peak);
+        v2_process_block(inst, buf, 128);
+        if (blk >= 350) for (int i = 0; i < 128; i++) { double v = buf[2*i] / 32768.0; e += v*v; cnt++; }
+    }
+    v2_destroy_instance(inst);
+    return 20.0f * log10f((float)sqrt(e / cnt) + 1e-12f);
+}
+static float noise_out_db(float in_gain_db, int lsb_peak) {
+    return noise_out_db_tame(in_gain_db, lsb_peak, 0.0f);
+}
+
+static void test_noise_floor(void) {
+    /* int16 residue (+-1 LSB) must not be expanded into audible hiss. Without
+     * the floor this measured -46 dBFS; band makeup gain alone gives ~-76. */
+    float lsb = noise_out_db(0.0f, 1);
+    CHECK(lsb < -70.0f, "+-1 LSB residue stays below -70 dBFS (no upward blow-up)");
+
+    /* The floor rides In Gain: +18 dB of input gain lifts the residue with it,
+     * but it still must not get the full +30 dB expansion on top. */
+    float lsb_boost = noise_out_db(18.0f, 1);
+    CHECK(lsb_boost < -52.0f, "noise floor follows In Gain");
+
+    /* Real quiet material well above the floor keeps full upward gain: a
+     * -60 dBFS-ish signal still gets >+30 dB, matching upstream. */
+    float quiet = noise_out_db(0.0f, 57);   /* ~-60 dBFS rms */
+    CHECK(quiet > -30.0f, "quiet material above the floor is still fully expanded");
+
+    /* Tame lifts the floor for noisy sources: hiss around -77 dBFS is fully
+     * expanded at Tame 0 and left close to its own level at Tame 12 (max). */
+    float hiss0  = noise_out_db_tame(0.0f, 8, 0.0f);
+    float hiss12 = noise_out_db_tame(0.0f, 8, 12.0f);
+    CHECK(hiss0 - hiss12 > 20.0f, "tame lifts the floor over noisy sources");
+
+    /* Tame at its minimum switches the floor off: +-1 LSB residue gets the
+     * full upstream blow-up again (~-46 dBFS). */
+    float off = noise_out_db_tame(0.0f, 1, -12.0f);
+    CHECK(off > -50.0f, "tame at minimum turns the floor off");
+
+        /* ...and is saved/restored with the patch. */
+    ottx_t *inst = (ottx_t *)v2_create_instance(NULL, NULL);
+    v2_set_param(inst, "tame", "7");
+    char st[2048]; v2_get_param(inst, "state", st, sizeof(st));
+    ottx_t *inst2 = (ottx_t *)v2_create_instance(NULL, NULL);
+    v2_set_param(inst2, "state", st);
+    CHECK_NEAR(inst2->tame, 7.0f, 0.001f, "tame round-trips through state");
+    v2_destroy_instance(inst); v2_destroy_instance(inst2);
+}
+
 int main(void) {
     test_fastmath();
     test_smoothing();
@@ -341,6 +402,7 @@ int main(void) {
     test_passthrough_when_dry();
     test_bypass();
     test_compressor();
+    test_noise_floor();
     test_multiband();
     test_params();
     test_ui_hierarchy_submenu();
